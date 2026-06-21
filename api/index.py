@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
@@ -8,6 +8,7 @@ import os
 
 app = FastAPI()
 
+# Standard CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,11 +20,13 @@ class TelemetryQuery(BaseModel):
     regions: List[str]
     threshold_ms: float
 
-# This looks for the file in the root of your project
 DATA_PATH = os.path.join(os.getcwd(), "q-vercel-latency.json")
 
 @app.post("/")
-def get_metrics(body: TelemetryQuery):
+async def get_metrics(body: TelemetryQuery, response: Response):
+    # Explicitly set headers on the response object
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    
     if not os.path.exists(DATA_PATH):
         return {"error": "Data file not found"}
     
@@ -32,7 +35,6 @@ def get_metrics(body: TelemetryQuery):
         results = {}
         
         for r in body.regions:
-            # Filter by region (case-insensitive)
             region_df = df[df['region'].str.lower() == r.lower()]
             
             if region_df.empty:
