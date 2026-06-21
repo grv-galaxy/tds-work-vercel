@@ -7,65 +7,75 @@ import os
 
 app = FastAPI()
 
-# Enable CORS for POST requests from any origin
+# Perfect CORS configuration for both POST and OPTIONS checks
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["POST"],
+    allow_methods=["POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# Request Schema
 class TelemetryQuery(BaseModel):
     regions: List[str]
     threshold_ms: float
 
-# Path pointing to your JSON file
-DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "q-vercel-latency.json")
+# This path handles Vercel's multi-directory internal structure accurately
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_PATH = os.path.join(BASE_DIR, "q-vercel-latency.json")
 
 @app.post("/")
 def get_metrics(body: TelemetryQuery):
+    # Safety Check: If file isn't found, handle gracefully instead of throwing a 500 crash
     if not os.path.exists(DATA_PATH):
-        return {"error": f"Telemetry file not found at {DATA_PATH}"}
+        return {"error": f"File not found at location: {DATA_PATH}"}
     
-    # Read the JSON file directly into a DataFrame
-    df = pd.read_json(DATA_PATH)
-    
-    # Normalize column text headers just in case of spaces/capitalization differences
-    df.columns = [c.lower().strip() for c in df.columns]
-    
-    # Column mapping matching the assignments
-    latency_col = 'latency' if 'latency' in df.columns else 'latency_ms'
-    uptime_col = 'uptime'
-    region_col = 'region'
-    
-    results = {}
-    
-    for r in body.regions:
-        # Filter for rows matching the specified region
-        region_df = df[df[region_col].astype(str).str.lower() == r.lower()]
+    try:
+        # Load the data file safely
+        df = pd.read_json(DATA_PATH)
         
-        if region_df.empty:
-            continue
+        # Normalize column headers to lowercase and strip whitespaces
+        df.columns = [c.lower().strip() for c in df.columns]
+        
+        # Determine exact column names
+        latency_col = 'latency' if 'latency' in df.columns else 'latency_ms'
+        uptime_col = 'uptime'
+        region_col = 'region'
+        
+        results = {}
+        
+        for r in body.regions:
+            # Filter rows per region (case-insensitive strings)
+            region_df = df[df[region_col].astype(str).str.lower() == r.lower()]
             
-        latencies = region_df[latency_col].dropna()
-        uptimes = region_df[uptime_col].dropna()
-        
-        if len(latencies) == 0:
-            continue
+            if region_df.empty:
+                # If a requested region isn't found, provide default empty structures 
+                # so the script doesn't crash on statistical functions
+                results[r] = {
+                    "avg_latency": 0.0,
+                    "p95_latency": 0.0,
+                    "avg_uptime": 0.0,
+                    "breaches": 0
+                }
+                continue
+                
+            latencies = region_df[latency_col].dropna()
+            uptimes = region_df[uptime_col].dropna()
             
-        # Standard analytical metrics
-        avg_latency = float(latencies.mean())
-        p95_latency = float(latencies.quantile(0.95))
-        avg_uptime = float(uptimes.mean())
-        breaches = int((latencies > body.threshold_ms).sum())
-        
-        results[r] = {
-            "avg_latency": avg_latency,
-            "p95_latency": p95_latency,
-            "avg_uptime": avg_uptime,
-            "breaches": breaches
-        }
-        
-    return results
+            # Explicit standard type casting (float/int) avoids native NumPy type serialization errors
+            avg_latency = float(latencies.mean()) if len(latencies) > 0 else 0.0
+            p95_latency = float(latencies.quantile(0.95)) if len(latencies) > 0 else 0.0
+            avg_uptime = float(uptimes.mean()) if len(uptimes) > 0 else 0.0
+            breaches = int((latencies > body.threshold_ms).sum())
+            
+            results[r] = {
+                "avg_latency": avg_latency,
+                "p95_latency": p95_latency,
+                "avg_uptime": avg_uptime,
+                "breaches": breaches
+            }
+            
+        return results
+
+    except Exception as e:
+        return {"error": f"Internal execution crash: {str(e)}"}
